@@ -77,8 +77,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
     /* Check device capability */
     pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Checking if device can evaluate authentication policies");
     
-    LAPolicy policyToUse = LAPolicyDeviceOwnerAuthentication;
-    BOOL canEvaluate = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&error];
+    /* Use LAPolicyDeviceOwnerAuthenticationWithBiometrics to force local Touch ID/Face ID only (no Apple Watch) */
+    LAPolicy policyToUse = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+    BOOL canEvaluate = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&error];
     
     if (!canEvaluate) {
         pam_syslog(pamh, LOG_WARNING, "pam_touchid: Cannot evaluate standard policy");
@@ -114,7 +115,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         /* Use LAPolicyDeviceOwnerAuthentication - allows Touch ID, Face ID, Apple Watch, or passcode */
         pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Calling evaluatePolicy");
         
-        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+        [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
                 localizedReason:@"Authenticate with Touch ID for sudo"
                          reply:^(BOOL success, NSError *error) {
             pam_syslog(pamh, LOG_DEBUG, "pam_touchid: evaluatePolicy callback: success=%d, error=%@", success, error);
