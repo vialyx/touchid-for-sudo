@@ -24,6 +24,10 @@
 
 /*
  * pam_sm_authenticate - Perform authentication via Touch ID
+ * 
+ * This module requires local biometric authentication (Touch ID/Face ID)
+ * on the device itself, not Apple Watch. This ensures that users can
+ * authenticate directly on their computer with their fingerprint or face.
  */
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
                                     int argc, const char **argv) {
@@ -81,7 +85,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         /* Create a dispatch semaphore to wait for async completion */
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
         
-        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+        /* Use LAPolicyDeviceOwnerAuthenticationWithBiometrics to require local Touch ID */
+        /* This ensures Touch ID on the computer works, not just Apple Watch */
+        [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
                 localizedReason:@"Authenticate with Touch ID for sudo"
                          reply:^(BOOL success, NSError *error) {
             authSuccess = success;
