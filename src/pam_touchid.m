@@ -74,29 +74,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
     
     pam_syslog(pamh, LOG_DEBUG, "pam_touchid: LAContext created successfully");
     
-    /* Check device capability */
-    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Checking if device can evaluate authentication policies");
+    /* Note: We skip canEvaluatePolicy check because it fails in PAM/sudo context
+     * even though biometry works normally. Instead, we attempt evaluation directly
+     * and handle any errors during the actual authentication attempt. */
     
-    /* Use LAPolicyDeviceOwnerAuthenticationWithBiometrics to force local Touch ID/Face ID only (no Apple Watch) */
-    LAPolicy policyToUse = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
-    BOOL canEvaluate = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&error];
-    
-    if (!canEvaluate) {
-        pam_syslog(pamh, LOG_WARNING, "pam_touchid: Cannot evaluate standard policy");
-        if (error) {
-            LAError errorCode = [error code];
-            NSString *errorDesc = [error localizedDescription];
-            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Error code: %ld, Description: %s", 
-                      (long)errorCode, [errorDesc UTF8String]);
-        }
-        [context release];
-        [pool drain];
-        return PAM_AUTH_ERR;
-    }
-    
-    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Device can evaluate authentication, proceeding");
-    
-    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Touch ID is available, proceeding with authentication");
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Proceeding with Touch ID authentication attempt");
     touchIdSupported = YES;
     
     /* Attempt Touch ID authentication with retries */
@@ -147,6 +129,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
                 
                 if (errorCode == LAErrorUserCancel) {
                     pam_syslog(pamh, LOG_NOTICE, "pam_touchid: User cancelled Touch ID - falling back to password");
+                    [context release];
+                    [pool drain];
+                    return PAM_IGNORE;
+                } else if (errorCode == LAErrorBiometryNotAvailable || errorCode == -7) {
+                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Biometry not available (-7) - falling back to password");
                     [context release];
                     [pool drain];
                     return PAM_IGNORE;
