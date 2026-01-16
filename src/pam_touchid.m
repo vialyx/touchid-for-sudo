@@ -37,24 +37,32 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
     BOOL touchIdSupported = NO;
     NSError *error = nil;
     
+    /* Log module invocation */
+    pam_syslog(pamh, LOG_NOTICE, "pam_touchid: Authentication module called");
+    
     /* Get the user name */
     retval = pam_get_user(pamh, &user, NULL);
     if (retval != PAM_SUCCESS) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to get username (retval=%d)", retval);
         return retval;
     }
     
     if (user == NULL) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Username is NULL");
         return PAM_USER_UNKNOWN;
     }
     
+    pam_syslog(pamh, LOG_NOTICE, "pam_touchid: Authenticating user: %s", user);
+    
     /* Check if running as root (sudo context) */
     if (geteuid() != 0 && getuid() != 0) {
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Not running as root");
+        pam_syslog(pamh, LOG_WARNING, "pam_touchid: Not running as root (euid=%d, uid=%d)", geteuid(), getuid());
         return PAM_AUTH_ERR;
     }
     
     /* Initialize Autorelease Pool for Objective-C memory management */
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Initialized Objective-C autorelease pool");
     
     /* Check if Touch ID is available */
     LAContext *context = [[LAContext alloc] init];
@@ -64,19 +72,27 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         return PAM_AUTH_ERR;
     }
     
-    /* Check device capability */
-    if (![context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&error]) {
-        pam_syslog(pamh, LOG_WARNING, "pam_touchid: Touch ID not available or disabled");
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: LAContext created successfully");
+    
+    /* Check device capability - must use same policy we'll evaluate */
+    if (![context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&error]) {
+        pam_syslog(pamh, LOG_WARNING, "pam_touchid: Touch ID not available or disabled (policy check failed)");
+        if (error) {
+            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Error from canEvaluatePolicy: %ld", (long)[error code]);
+        }
         [context release];
         [pool drain];
         return PAM_AUTH_ERR;
     }
     
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Touch ID is available, proceeding with authentication");
     touchIdSupported = YES;
     
     /* Attempt Touch ID authentication with retries */
     for (i = 0; i < PAM_TOUCHID_MAX_RETRIES; i++) {
         error = nil;
+        
+        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Starting authentication attempt %d of %d", i + 1, PAM_TOUCHID_MAX_RETRIES);
         
         /* Use synchronous evaluation with proper method signature */
         __block BOOL authSuccess = NO;
@@ -87,32 +103,40 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         
         /* Use LAPolicyDeviceOwnerAuthenticationWithBiometrics to require local Touch ID */
         /* This ensures Touch ID on the computer works, not just Apple Watch */
+        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Calling evaluatePolicy with BiometricsOnly policy");
+        
         [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
                 localizedReason:@"Authenticate with Touch ID for sudo"
                          reply:^(BOOL success, NSError *error) {
+            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: evaluatePolicy callback: success=%d, error=%@", success, error);
             authSuccess = success;
             if (error) {
                 authError = [error code];
+                pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Authentication error code: %ld", (long)authError);
             }
             dispatch_semaphore_signal(sema);
         }];
         
         /* Wait for authentication to complete */
+        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Waiting for Touch ID response...");
         dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Touch ID response received (success=%d)", authSuccess);
         
         if (authSuccess) {
             /* Authentication successful */
-            pam_syslog(pamh, LOG_INFO, "pam_touchid: Touch ID authentication successful for user %s", user);
+            pam_syslog(pamh, LOG_NOTICE, "pam_touchid: ✓ Touch ID authentication SUCCESSFUL for user %s", user);
             [context release];
             [pool drain];
             return PAM_SUCCESS;
         } else {
             /* Authentication failed */
+            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Authentication attempt %d failed (authError=%ld)", i + 1, (long)authError);
+            
             if (authError != 0) {
                 LAError errorCode = authError;
                 
                 if (errorCode == LAErrorUserCancel) {
-                    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: User cancelled Touch ID");
+                    pam_syslog(pamh, LOG_NOTICE, "pam_touchid: User cancelled Touch ID");
                     [context release];
                     [pool drain];
                     return PAM_AUTH_ERR;
