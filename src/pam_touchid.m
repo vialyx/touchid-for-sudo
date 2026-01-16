@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <syslog.h>
 #include <security/pam_appl.h>
@@ -59,36 +60,40 @@ static int authenticate_via_helper(pam_handle_t *pamh, const char *user) {
     
     if (pid == 0) {
         /* Child process - run helper as user */
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Child process starting, switching to uid=%d", pwd->pw_uid);
+        /* Close parent's file descriptors first */
+        close(0);
+        close(1);
+        close(2);
+        
+        /* Redirect to dev/null to avoid issues */
+        int devnull = open("/dev/null", O_WRONLY);
+        dup2(devnull, 1);
+        dup2(devnull, 2);
+        
+        /* Note: syslog won't work after setuid, so we can't log errors here */
         
         /* Set up environment for user context */
         if (setgid(pwd->pw_gid) < 0) {
-            pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to setgid");
             _exit(1);
         }
         
         if (setuid(pwd->pw_uid) < 0) {
-            pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to setuid");
             _exit(1);
         }
-        
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Running helper as uid=%d", getuid());
         
         /* Execute helper */
         execl(HELPER_PATH, "touchid-helper", NULL);
         
-        /* If exec fails */
-        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to execute helper: %s", HELPER_PATH);
-        perror("execl");
+        /* If exec fails, exit silently (can't log after setuid) */
         _exit(1);
     }
     
     /* Parent process - wait for helper to start and accept connection */
     pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Parent process waiting for helper to be ready");
     
-    sleep(1);  /* Give helper time to start and bind socket */
+    sleep(2);  /* Give helper time to start and bind socket */
     
-    /* Connect to helper socket */
+    /* Connect to helper socket with retries */
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
         pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to create socket");
@@ -103,10 +108,23 @@ static int authenticate_via_helper(pam_handle_t *pamh, const char *user) {
     
     pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Connecting to helper socket at %s", SOCKET_PATH);
     
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to connect to helper socket");
+    int connect_retries = 3;
+    while (connect_retries > 0) {
+        if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            break;
+        }
+        connect_retries--;
+        if (connect_retries > 0) {
+            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Socket connection failed, retrying... (%d left)", connect_retries);
+            sleep(1);
+        }
+    }
+    
+    if (connect_retries == 0) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to connect to helper socket after retries");
         close(sock);
         kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
         return PAM_AUTH_ERR;
     }
     
