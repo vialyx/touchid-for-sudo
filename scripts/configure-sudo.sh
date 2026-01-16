@@ -51,47 +51,52 @@ fi
 
 log_info "Configuring sudo to use Touch ID..."
 
-# Backup existing sudo PAM config
-if [ ! -f "$SUDO_PAM_BACKUP" ]; then
-    log_info "Backing up original sudo PAM configuration..."
-    cp "$SUDO_PAM" "$SUDO_PAM_BACKUP"
-    log_success "Backup saved to $SUDO_PAM_BACKUP"
-else
-    log_warning "Backup already exists at $SUDO_PAM_BACKUP"
-fi
+# Modern macOS uses /etc/pam.d/sudo_local for local customizations
+SUDO_LOCAL="/etc/pam.d/sudo_local"
 
 # Check if already configured
-if grep -q "pam_touchid.so" "$SUDO_PAM"; then
+if grep -q "pam_touchid.so" "$SUDO_LOCAL" 2>/dev/null; then
     log_warning "Touch ID is already configured for sudo"
     exit 0
 fi
 
-# Get the current auth line (usually first auth line)
-FIRST_AUTH_LINE=$(grep -n "^auth" "$SUDO_PAM" | head -1 | cut -d: -f1)
-
-if [ -z "$FIRST_AUTH_LINE" ]; then
-    log_error "Could not find auth configuration in $SUDO_PAM"
-    exit 1
+if [ ! -f "$SUDO_LOCAL" ]; then
+    # Create new sudo_local
+    log_info "Creating $SUDO_LOCAL for Touch ID..."
+    {
+        echo "# Touch ID for Sudo - local customization for sudo PAM"
+        echo "auth       sufficient     $PAM_MODULE"
+    } > "$SUDO_LOCAL"
+    chmod 644 "$SUDO_LOCAL"
+    log_success "Created $SUDO_LOCAL"
+else
+    # Add Touch ID to existing sudo_local
+    log_info "Adding Touch ID to existing $SUDO_LOCAL..."
+    
+    if [ ! -f "$SUDO_PAM_BACKUP" ]; then
+        cp "$SUDO_LOCAL" "$SUDO_PAM_BACKUP"
+    fi
+    
+    {
+        echo "# Touch ID for Sudo - added by configure script"
+        echo "auth       sufficient     $PAM_MODULE"
+        cat "$SUDO_LOCAL"
+    } > "$SUDO_LOCAL.tmp"
+    
+    mv "$SUDO_LOCAL.tmp" "$SUDO_LOCAL"
+    chmod 644 "$SUDO_LOCAL"
+    log_success "Updated $SUDO_LOCAL"
 fi
 
-# Create temporary file with new config
-TEMP_FILE=$(mktemp)
-
-# Insert Touch ID module before the first auth line
-head -n $((FIRST_AUTH_LINE - 1)) "$SUDO_PAM" > "$TEMP_FILE"
-echo "auth       optional       $PAM_MODULE" >> "$TEMP_FILE"
-tail -n +$FIRST_AUTH_LINE "$SUDO_PAM" >> "$TEMP_FILE"
-
-# Replace the original file
-cp "$TEMP_FILE" "$SUDO_PAM"
-rm "$TEMP_FILE"
-
-log_success "sudo PAM configuration updated successfully!"
-log_info "Touch ID is now enabled for sudo authentication"
-log_warning "Note: You may need to restart Terminal or your session for changes to take effect"
-
-# Show current configuration
-log_info "Current sudo PAM configuration:"
-echo ""
-grep -n "^auth" "$SUDO_PAM" | head -5
-echo ""
+# Verify configuration
+if grep -q "pam_touchid.so" "$SUDO_LOCAL"; then
+    log_success "Touch ID is now enabled for sudo authentication!"
+    echo ""
+    log_info "Current sudo_local configuration:"
+    echo ""
+    cat "$SUDO_LOCAL"
+    echo ""
+else
+    log_error "Configuration failed!"
+    exit 1
+fi

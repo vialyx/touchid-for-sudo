@@ -169,16 +169,51 @@ if [ ! -f "$BACKUP_PAM" ]; then
 fi
 
 # Configure sudo to use Touch ID
-if ! grep -q "pam_touchid.so" "$SUDO_PAM"; then
-    # Add auth sufficient line for Touch ID before the unix auth
-    sed -i '.bak' "/^auth.*pam_unix.so/i\\
-auth       sufficient     $PAM_MODULE" "$SUDO_PAM"
-    echo "✓ Configured sudo to use Touch ID"
-    echo "DEBUG: Updated sudo PAM configuration"
-    grep pam_touchid "$SUDO_PAM" && echo "DEBUG: Verified pam_touchid.so is in $SUDO_PAM" || echo "DEBUG: WARNING - pam_touchid.so NOT found in $SUDO_PAM"
+# Modern macOS uses /etc/pam.d/sudo_local for local customizations
+SUDO_LOCAL="/etc/pam.d/sudo_local"
+SUDO_LOCAL_BACKUP="/etc/pam.d/sudo_local.backup.touchid"
+
+if [ ! -f "$SUDO_LOCAL" ]; then
+    echo "✓ Creating sudo_local for Touch ID configuration"
+    
+    # Create sudo_local with Touch ID configuration
+    cat > "$SUDO_LOCAL" << 'SUDO_LOCAL_CONTENT'
+# sudo_local: local sudo PAM configuration
+# Added for Touch ID support - customize this file
+
+auth       sufficient     /usr/local/lib/pam/pam_touchid.so
+SUDO_LOCAL_CONTENT
+    
+    chmod 644 "$SUDO_LOCAL"
+    echo "DEBUG: Created $SUDO_LOCAL with Touch ID configuration"
 else
-    echo "ℹ Sudo already configured for Touch ID"
-    echo "DEBUG: Touch ID already configured"
+    # sudo_local exists - check if already configured
+    if ! grep -q "pam_touchid.so" "$SUDO_LOCAL"; then
+        # Backup existing sudo_local
+        cp "$SUDO_LOCAL" "$SUDO_LOCAL_BACKUP"
+        
+        # Add Touch ID to the top of sudo_local
+        {
+            echo "# Added by Touch ID for Sudo installation"
+            echo "auth       sufficient     /usr/local/lib/pam/pam_touchid.so"
+            cat "$SUDO_LOCAL"
+        } > "$SUDO_LOCAL.tmp"
+        
+        mv "$SUDO_LOCAL.tmp" "$SUDO_LOCAL"
+        echo "DEBUG: Updated existing $SUDO_LOCAL with Touch ID configuration"
+    else
+        echo "ℹ Touch ID already configured in $SUDO_LOCAL"
+        echo "DEBUG: Touch ID already in sudo_local"
+    fi
+fi
+
+# Verify configuration was applied
+if grep -q "pam_touchid.so" "$SUDO_LOCAL" 2>/dev/null; then
+    echo "✓ Touch ID configuration verified"
+    echo "DEBUG: ✓ pam_touchid.so confirmed in $SUDO_LOCAL"
+else
+    echo "✗ Warning: Configuration verification failed"
+    echo "DEBUG: ✗ pam_touchid.so NOT found after configuration!"
 fi
 
 echo ""
@@ -222,9 +257,22 @@ if [ ! -f "$BACKUP" ]; then
 fi
 
 if ! grep -q "pam_touchid.so" "$SUDO_PAM"; then
-    sed -i '.bak' '/^auth.*pam_unix.so/i\
-auth       sufficient     '$PAM_MODULE'
-' "$SUDO_PAM"
+    # Modern macOS: use sudo_local for local customizations
+    SUDO_LOCAL="/etc/pam.d/sudo_local"
+    
+    if [ ! -f "$SUDO_LOCAL" ]; then
+        # Create new sudo_local
+        echo "auth       sufficient     $PAM_MODULE" > "$SUDO_LOCAL"
+        chmod 644 "$SUDO_LOCAL"
+    else
+        # Add to existing sudo_local (at the top)
+        cp "$SUDO_LOCAL" "$SUDO_LOCAL.bak"
+        {
+            echo "auth       sufficient     $PAM_MODULE"
+            cat "$SUDO_LOCAL.bak"
+        } > "$SUDO_LOCAL"
+    fi
+    
     echo "✓ Configured for Touch ID"
 fi
 echo "Test with: sudo whoami"
@@ -241,8 +289,8 @@ else
     echo "✗ PAM module NOT found"
 fi
 
-if grep -q "pam_touchid.so" "/etc/pam.d/sudo" 2>/dev/null; then
-    echo "✓ Sudo configured"
+if grep -q "pam_touchid.so" "/etc/pam.d/sudo_local" 2>/dev/null; then
+    echo "✓ Sudo configured for Touch ID"
 else
     echo "ℹ Not yet configured - run: sudo touchid-configure"
 fi
@@ -254,13 +302,30 @@ if [ "$EUID" -ne 0 ]; then
     echo "Error: Run with sudo"
     exit 1
 fi
-BACKUP="/etc/pam.d/sudo.backup.touchid"
-if [ -f "$BACKUP" ]; then
-    cp "$BACKUP" "/etc/pam.d/sudo"
-    echo "✓ Restored sudo configuration"
+
+# Remove Touch ID from sudo_local
+SUDO_LOCAL="/etc/pam.d/sudo_local"
+SUDO_LOCAL_BACKUP="/etc/pam.d/sudo_local.backup.touchid"
+
+if [ -f "$SUDO_LOCAL" ]; then
+    # Backup current state
+    cp "$SUDO_LOCAL" "$SUDO_LOCAL_BACKUP"
+    
+    # Remove lines containing pam_touchid
+    grep -v "pam_touchid" "$SUDO_LOCAL" > "$SUDO_LOCAL.tmp"
+    mv "$SUDO_LOCAL.tmp" "$SUDO_LOCAL"
+    
+    # Remove sudo_local if it's now empty (except comments)
+    if ! grep -q "^auth" "$SUDO_LOCAL" 2>/dev/null; then
+        rm "$SUDO_LOCAL"
+    fi
+    
+    echo "✓ Removed Touch ID from sudo"
 fi
+
+# Remove PAM module
 rm -f "/usr/local/lib/pam/pam_touchid.so"
-echo "✓ Uninstalled"
+echo "✓ Uninstalled Touch ID for Sudo"
 EOF
 
 chmod +x "$WORK_DIR/payload/usr/local/bin/touchid-"*

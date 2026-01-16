@@ -44,21 +44,29 @@ fi
 
 log_info "Uninstalling Touch ID for Sudo..."
 
-# Remove PAM module reference from sudo config
-if grep -q "pam_touchid.so" "$SUDO_PAM"; then
-    log_info "Removing Touch ID from sudo configuration..."
+# Remove from sudo_local (modern macOS approach)
+SUDO_LOCAL="/etc/pam.d/sudo_local"
+SUDO_LOCAL_BACKUP="/etc/pam.d/sudo_local.backup.touchid"
+
+if grep -q "pam_touchid.so" "$SUDO_LOCAL" 2>/dev/null; then
+    log_info "Removing Touch ID from $SUDO_LOCAL..."
     
-    if [ -f "$SUDO_PAM_BACKUP" ]; then
-        log_info "Restoring from backup..."
-        cp "$SUDO_PAM_BACKUP" "$SUDO_PAM"
-        log_success "Restored original sudo configuration from backup"
+    # Backup current state
+    cp "$SUDO_LOCAL" "$SUDO_LOCAL_BACKUP"
+    
+    # Remove lines containing pam_touchid
+    grep -v "pam_touchid" "$SUDO_LOCAL" > "$SUDO_LOCAL.tmp"
+    mv "$SUDO_LOCAL.tmp" "$SUDO_LOCAL"
+    
+    # Remove sudo_local if it's now empty
+    if ! grep -q "^auth" "$SUDO_LOCAL" 2>/dev/null; then
+        rm "$SUDO_LOCAL"
+        log_success "Removed $SUDO_LOCAL (was empty after removing Touch ID)"
     else
-        log_warning "Backup not found, manually removing pam_touchid.so from $SUDO_PAM"
-        sed -i '' '/pam_touchid.so/d' "$SUDO_PAM"
-        log_success "Removed pam_touchid.so reference"
+        log_success "Removed Touch ID from $SUDO_LOCAL"
     fi
 else
-    log_warning "Touch ID is not configured in sudo PAM"
+    log_warning "Touch ID is not configured in $SUDO_LOCAL"
 fi
 
 # Remove PAM module

@@ -49,13 +49,15 @@ fi
 
 echo ""
 
-# Check if configured in sudo
-if grep -q "pam_touchid.so" "$SUDO_PAM"; then
+# Check if configured in sudo_local
+SUDO_LOCAL="/etc/pam.d/sudo_local"
+if grep -q "pam_touchid.so" "$SUDO_LOCAL" 2>/dev/null; then
     log_success "Touch ID configured for sudo"
-    log_info "Configuration:"
-    grep "pam_touchid.so" "$SUDO_PAM" | sed 's/^/    /'
+    log_info "Configuration in $SUDO_LOCAL:"
+    grep "pam_touchid.so" "$SUDO_LOCAL" | sed 's/^/    /'
 else
     log_warning "Touch ID not configured for sudo"
+    log_info "Run 'sudo ./scripts/configure-sudo.sh' to enable"
 fi
 
 echo ""
