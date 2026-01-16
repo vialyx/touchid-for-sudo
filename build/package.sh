@@ -111,11 +111,17 @@ mkdir -p "$WORK_DIR/scripts"
 log_success "Package directories created"
 echo ""
 
-# Step 4: Copy PAM module
-log_info "Step 4: Copying PAM module..."
+# Step 4: Copy PAM module and helper
+log_info "Step 4: Copying PAM module and helper..."
 cp "$PROJECT_DIR/build/pam_touchid.so" "$WORK_DIR/payload/usr/local/lib/pam/pam_touchid.so"
 chmod 755 "$WORK_DIR/payload/usr/local/lib/pam/pam_touchid.so"
 log_success "PAM module installed"
+
+# Create helper directory
+mkdir -p "$WORK_DIR/payload/usr/local/bin"
+cp "$PROJECT_DIR/build/touchid-helper" "$WORK_DIR/payload/usr/local/bin/touchid-helper"
+chmod 755 "$WORK_DIR/payload/usr/local/bin/touchid-helper"
+log_success "Helper installed"
 echo ""
 
 # Step 5: Create helper scripts

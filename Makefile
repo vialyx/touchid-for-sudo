@@ -9,11 +9,16 @@ SRC_DIR := src
 BUILD_DIR := build
 SCRIPTS_DIR := scripts
 INSTALL_DIR := /usr/local/lib/pam
+HELPER_INSTALL_DIR := /usr/local/bin
 
 # Files
-SOURCE := $(SRC_DIR)/pam_touchid.m
-OBJECT := $(BUILD_DIR)/pam_touchid.o
-TARGET := $(BUILD_DIR)/pam_touchid.so
+PAM_SOURCE := $(SRC_DIR)/pam_touchid.m
+PAM_OBJECT := $(BUILD_DIR)/pam_touchid.o
+PAM_TARGET := $(BUILD_DIR)/pam_touchid.so
+
+HELPER_SOURCE := $(SRC_DIR)/touchid-helper.m
+HELPER_OBJECT := $(BUILD_DIR)/touchid-helper.o
+HELPER_TARGET := $(BUILD_DIR)/touchid-helper
 
 # Phony targets
 .PHONY: all clean install uninstall build help
@@ -26,25 +31,34 @@ help:
 	@echo "Touch ID for Sudo - macOS PAM Module"
 	@echo "===================================="
 	@echo "Available targets:"
-	@echo "  make build       - Build the PAM module"
-	@echo "  make install     - Install the PAM module (requires sudo)"
-	@echo "  make uninstall   - Remove the PAM module (requires sudo)"
+	@echo "  make build       - Build the PAM module and helper"
+	@echo "  make install     - Install the PAM module and helper (requires sudo)"
+	@echo "  make uninstall   - Remove the PAM module and helper (requires sudo)"
 	@echo "  make clean       - Clean build artifacts"
 	@echo "  make help        - Show this help message"
 
 # Build target
-build: $(TARGET)
+build: $(PAM_TARGET) $(HELPER_TARGET)
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-$(OBJECT): $(SOURCE) | $(BUILD_DIR)
-	@echo "Compiling: $<"
+$(PAM_OBJECT): $(PAM_SOURCE) | $(BUILD_DIR)
+	@echo "Compiling PAM module: $<"
 	@$(CC) $(CFLAGS) -c $< -o $@ $(FRAMEWORKS)
 
-$(TARGET): $(OBJECT)
+$(PAM_TARGET): $(PAM_OBJECT)
 	@echo "Linking: $@"
-	@$(CC) $(LDFLAGS) $(OBJECT) -o $@ $(FRAMEWORKS) $(LIBS)
+	@$(CC) $(LDFLAGS) $(PAM_OBJECT) -o $@ $(FRAMEWORKS) $(LIBS)
+	@echo "✓ Build complete: $@"
+
+$(HELPER_OBJECT): $(HELPER_SOURCE) | $(BUILD_DIR)
+	@echo "Compiling helper: $<"
+	@$(CC) $(CFLAGS) -c $< -o $@ $(FRAMEWORKS)
+
+$(HELPER_TARGET): $(HELPER_OBJECT)
+	@echo "Linking: $@"
+	@$(CC) $(HELPER_OBJECT) -o $@ $(FRAMEWORKS) $(LIBS)
 	@echo "✓ Build complete: $@"
 
 # Install target
@@ -54,16 +68,26 @@ install: build
 		echo "Error: $(INSTALL_DIR) does not exist"; \
 		exit 1; \
 	fi
-	@sudo cp $(TARGET) $(INSTALL_DIR)/pam_touchid.so
+	@sudo cp $(PAM_TARGET) $(INSTALL_DIR)/pam_touchid.so
 	@sudo chmod 755 $(INSTALL_DIR)/pam_touchid.so
-	@echo "✓ Module installed to $(INSTALL_DIR)/pam_touchid.so"
+	@echo "✓ PAM module installed to $(INSTALL_DIR)/pam_touchid.so"
+	@sudo cp $(HELPER_TARGET) $(HELPER_INSTALL_DIR)/touchid-helper
+	@sudo chmod 755 $(HELPER_INSTALL_DIR)/touchid-helper
+	@echo "✓ Helper installed to $(HELPER_INSTALL_DIR)/touchid-helper"
 	@echo "Run './scripts/configure-sudo.sh' to enable Touch ID for sudo"
 
 # Uninstall target
 uninstall:
 	@echo "Uninstalling Touch ID for Sudo..."
 	@sudo rm -f $(INSTALL_DIR)/pam_touchid.so
-	@echo "✓ Module uninstalled"
+	@sudo rm -f $(HELPER_INSTALL_DIR)/touchid-helper
+	@echo "✓ Module and helper uninstalled"
+
+# Clean target
+clean:
+	@echo "Cleaning build artifacts..."
+	@rm -rf $(BUILD_DIR)
+	@echo "✓ Clean complete"
 
 # Clean target
 clean:

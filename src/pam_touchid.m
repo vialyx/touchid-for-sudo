@@ -2,7 +2,10 @@
  * PAM module for Touch ID authentication on macOS
  * Allows using Touch ID instead of password for sudo authentication
  *
- * Compile: gcc -fPIC -shared -o pam_touchid.so pam_touchid.c -lpam
+ * Communicates with touchid-helper (user-space) for biometric authentication
+ * This ensures the helper runs with user privileges to access biometric data
+ *
+ * Compile: gcc -fPIC -shared -o pam_touchid.so pam_touchid.m -lpam
  */
 
 #include <stdio.h>
@@ -11,31 +14,140 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <syslog.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
-#include <LocalAuthentication/LocalAuthentication.h>
-#include <Foundation/Foundation.h>
 
 #define PAM_TOUCHID_MAX_RETRIES 3
+#define SOCKET_PATH "/tmp/touchid-auth.sock"
+#define HELPER_PATH "/usr/local/bin/touchid-helper"
+#define SOCKET_TIMEOUT 60
 
 /* Use syslog instead of pam_syslog */
 #define pam_syslog(h, p, f, ...) syslog(p, f, ##__VA_ARGS__)
 
 /*
- * pam_sm_authenticate - Perform authentication via Touch ID
+ * authenticate_via_helper - Communicate with user-space helper for biometric auth
  * 
- * This module requires local biometric authentication (Touch ID/Face ID)
- * on the device itself, not Apple Watch. This ensures that users can
- * authenticate directly on their computer with their fingerprint or face.
+ * Returns:
+ *   PAM_SUCCESS - Authentication successful
+ *   PAM_IGNORE  - User cancelled or authentication not available (allow password)
+ *   PAM_AUTH_ERR - Error during helper communication
+ */
+static int authenticate_via_helper(pam_handle_t *pamh, const char *user) {
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Starting helper authentication for user %s", user);
+    
+    /* Get user info to switch context */
+    struct passwd *pwd = getpwnam(user);
+    if (pwd == NULL) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to get user info for %s", user);
+        return PAM_USER_UNKNOWN;
+    }
+    
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: User %s has uid=%d, gid=%d", user, pwd->pw_uid, pwd->pw_gid);
+    
+    /* Fork process to run helper as user */
+    pid_t pid = fork();
+    if (pid < 0) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to fork helper process");
+        return PAM_AUTH_ERR;
+    }
+    
+    if (pid == 0) {
+        /* Child process - run helper as user */
+        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Child process starting, switching to uid=%d", pwd->pw_uid);
+        
+        /* Set up environment for user context */
+        if (setgid(pwd->pw_gid) < 0) {
+            pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to setgid");
+            _exit(1);
+        }
+        
+        if (setuid(pwd->pw_uid) < 0) {
+            pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to setuid");
+            _exit(1);
+        }
+        
+        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Running helper as uid=%d", getuid());
+        
+        /* Execute helper */
+        execl(HELPER_PATH, "touchid-helper", NULL);
+        
+        /* If exec fails */
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to execute helper: %s", HELPER_PATH);
+        perror("execl");
+        _exit(1);
+    }
+    
+    /* Parent process - wait for helper to start and accept connection */
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Parent process waiting for helper to be ready");
+    
+    sleep(1);  /* Give helper time to start and bind socket */
+    
+    /* Connect to helper socket */
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to create socket");
+        kill(pid, SIGTERM);
+        return PAM_AUTH_ERR;
+    }
+    
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Connecting to helper socket at %s", SOCKET_PATH);
+    
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to connect to helper socket");
+        close(sock);
+        kill(pid, SIGTERM);
+        return PAM_AUTH_ERR;
+    }
+    
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Connected to helper, waiting for authentication result");
+    
+    /* Read response from helper */
+    char response[32] = {0};
+    ssize_t n = read(sock, response, sizeof(response) - 1);
+    
+    close(sock);
+    
+    /* Wait for helper process to exit */
+    int status;
+    waitpid(pid, &status, 0);
+    
+    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Helper returned response: %s", response);
+    
+    if (n <= 0) {
+        pam_syslog(pamh, LOG_WARNING, "pam_touchid: Failed to read response from helper");
+        return PAM_AUTH_ERR;
+    }
+    
+    /* Parse response */
+    if (strncmp(response, "SUCCESS", n) == 0) {
+        pam_syslog(pamh, LOG_NOTICE, "pam_touchid: ✓ Touch ID authentication SUCCESSFUL");
+        return PAM_SUCCESS;
+    } else if (strncmp(response, "CANCEL", n) == 0) {
+        pam_syslog(pamh, LOG_NOTICE, "pam_touchid: Touch ID cancelled/unavailable - falling back to password");
+        return PAM_IGNORE;
+    } else {
+        pam_syslog(pamh, LOG_WARNING, "pam_touchid: Unknown response from helper: %s", response);
+        return PAM_AUTH_ERR;
+    }
+}
+/*
+ * pam_sm_authenticate - Perform authentication via Touch ID helper
  */
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
                                     int argc, const char **argv) {
     const char *user;
     int retval;
-    int i;
-    BOOL touchIdSupported = NO;
-    NSError *error = nil;
     
     /* Log module invocation */
     pam_syslog(pamh, LOG_NOTICE, "pam_touchid: Authentication module called");
@@ -60,106 +172,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         return PAM_AUTH_ERR;
     }
     
-    /* Initialize Autorelease Pool for Objective-C memory management */
-    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Initialized Objective-C autorelease pool");
-    
-    /* Check if Touch ID is available */
-    LAContext *context = [[LAContext alloc] init];
-    if (context == nil) {
-        pam_syslog(pamh, LOG_ERR, "pam_touchid: Failed to create LAContext");
-        [pool drain];
-        return PAM_AUTH_ERR;
-    }
-    
-    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: LAContext created successfully");
-    
-    /* Note: We skip canEvaluatePolicy check because it fails in PAM/sudo context
-     * even though biometry works normally. Instead, we attempt evaluation directly
-     * and handle any errors during the actual authentication attempt. */
-    
-    pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Proceeding with Touch ID authentication attempt");
-    touchIdSupported = YES;
-    
-    /* Attempt Touch ID authentication with retries */
-    for (i = 0; i < PAM_TOUCHID_MAX_RETRIES; i++) {
-        error = nil;
-        
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Starting authentication attempt %d of %d", i + 1, PAM_TOUCHID_MAX_RETRIES);
-        
-        /* Use synchronous evaluation with proper method signature */
-        __block BOOL authSuccess = NO;
-        __block LAError authError = 0;
-        
-        /* Create a dispatch semaphore to wait for async completion */
-        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-        
-        /* Use LAPolicyDeviceOwnerAuthentication - allows Touch ID, Face ID, Apple Watch, or passcode */
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Calling evaluatePolicy");
-        
-        [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-                localizedReason:@"Authenticate with Touch ID for sudo"
-                         reply:^(BOOL success, NSError *error) {
-            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: evaluatePolicy callback: success=%d, error=%@", success, error);
-            authSuccess = success;
-            if (error) {
-                authError = [error code];
-                pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Authentication error code: %ld", (long)authError);
-            }
-            dispatch_semaphore_signal(sema);
-        }];
-        
-        /* Wait for authentication to complete */
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Waiting for Touch ID response...");
-        dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-        pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Touch ID response received (success=%d)", authSuccess);
-        
-        if (authSuccess) {
-            /* Authentication successful */
-            pam_syslog(pamh, LOG_NOTICE, "pam_touchid: ✓ Touch ID authentication SUCCESSFUL for user %s", user);
-            [context release];
-            [pool drain];
-            return PAM_SUCCESS;
-        } else {
-            /* Authentication failed */
-            pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Authentication attempt %d failed (authError=%ld)", i + 1, (long)authError);
-            
-            if (authError != 0) {
-                LAError errorCode = authError;
-                
-                if (errorCode == LAErrorUserCancel) {
-                    pam_syslog(pamh, LOG_NOTICE, "pam_touchid: User cancelled Touch ID - falling back to password");
-                    [context release];
-                    [pool drain];
-                    return PAM_IGNORE;
-                } else if (errorCode == LAErrorBiometryNotAvailable || errorCode == -7) {
-                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Biometry not available (-7) - falling back to password");
-                    [context release];
-                    [pool drain];
-                    return PAM_IGNORE;
-                } else if (errorCode == LAErrorTouchIDNotAvailable) {
-                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Touch ID not available - falling back to password");
-                    [context release];
-                    [pool drain];
-                    return PAM_IGNORE;
-                } else if (errorCode == LAErrorPasscodeNotSet) {
-                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Passcode not set - falling back to password");
-                    [context release];
-                    [pool drain];
-                    return PAM_IGNORE;
-                }
-            }
-            
-            if (i < PAM_TOUCHID_MAX_RETRIES - 1) {
-                pam_syslog(pamh, LOG_DEBUG, "pam_touchid: Authentication attempt %d failed, retrying...", i + 1);
-            }
-        }
-    }
-    
-    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Maximum authentication attempts exceeded - falling back to password");
-    [context release];
-    [pool drain];
-    return PAM_IGNORE;
+    /* Authenticate via user-space helper */
+    return authenticate_via_helper(pamh, user);
 }
 
 /*

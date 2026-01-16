@@ -77,6 +77,15 @@ else
     log_warning "PAM module not found at $PAM_MODULE"
 fi
 
+# Remove helper binary
+HELPER_BIN="/usr/local/bin/touchid-helper"
+if [ -f "$HELPER_BIN" ]; then
+    rm -f "$HELPER_BIN"
+    log_success "Removed helper from $HELPER_BIN"
+else
+    log_warning "Helper not found at $HELPER_BIN"
+fi
+
 # Clean backups
 if [ -f "$SUDO_PAM_BACKUP" ]; then
     read -p "Remove backup file? (y/n) " -n 1 -r
