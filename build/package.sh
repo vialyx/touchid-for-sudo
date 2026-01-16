@@ -133,15 +133,56 @@ PREINSTALL
 
 cat > "$WORK_DIR/scripts/postinstall" << 'POSTINSTALL'
 #!/bin/bash
+
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║  Touch ID for Sudo - Installation Complete!                 ║"
+echo "║  Touch ID for Sudo - Configuration in Progress               ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Next steps:"
-echo "  1. Open Terminal"
-echo "  2. Run: sudo touchid-configure"
-echo "  3. Test: sudo whoami"
+
+# Configuration paths
+PAM_MODULE="/usr/local/lib/pam/pam_touchid.so"
+SUDO_PAM="/etc/pam.d/sudo"
+BACKUP_PAM="/etc/pam.d/sudo.backup.touchid"
+
+# Verify PAM module exists
+if [ ! -f "$PAM_MODULE" ]; then
+    echo "✗ Error: PAM module not found at $PAM_MODULE"
+    echo "Installation may have failed"
+    exit 1
+fi
+
+echo "✓ PAM module verified"
+
+# Backup original sudo PAM config if not already backed up
+if [ ! -f "$BACKUP_PAM" ]; then
+    cp "$SUDO_PAM" "$BACKUP_PAM"
+    echo "✓ Backed up original sudo configuration"
+fi
+
+# Configure sudo to use Touch ID
+if ! grep -q "pam_touchid.so" "$SUDO_PAM"; then
+    # Add auth sufficient line for Touch ID before the unix auth
+    sed -i '.bak' '/^auth.*pam_unix.so/i\
+auth       sufficient     '$PAM_MODULE'
+' "$SUDO_PAM"
+    echo "✓ Configured sudo to use Touch ID"
+else
+    echo "ℹ Sudo already configured for Touch ID"
+fi
+
+echo ""
+echo "╔════════════════════════════════════════════════════════════════╗"
+echo "║  Installation & Configuration Complete! ✓                    ║"
+echo "╚════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "You can now use Touch ID with sudo:"
+echo "  sudo whoami"
+echo ""
+echo "Useful commands:"
+echo "  touchid-status     - Check installation status"
+echo "  sudo touchid-configure - Re-configure if needed"
+echo "  sudo touchid-uninstall - Remove Touch ID from sudo"
 echo ""
 exit 0
 POSTINSTALL
