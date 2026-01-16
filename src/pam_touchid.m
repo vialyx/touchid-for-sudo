@@ -145,20 +145,20 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
                 LAError errorCode = authError;
                 
                 if (errorCode == LAErrorUserCancel) {
-                    pam_syslog(pamh, LOG_NOTICE, "pam_touchid: User cancelled Touch ID");
+                    pam_syslog(pamh, LOG_NOTICE, "pam_touchid: User cancelled Touch ID - falling back to password");
                     [context release];
                     [pool drain];
-                    return PAM_AUTH_ERR;
+                    return PAM_IGNORE;
                 } else if (errorCode == LAErrorTouchIDNotAvailable) {
-                    pam_syslog(pamh, LOG_ERR, "pam_touchid: Touch ID not available");
+                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Touch ID not available - falling back to password");
                     [context release];
                     [pool drain];
-                    return PAM_AUTH_ERR;
+                    return PAM_IGNORE;
                 } else if (errorCode == LAErrorPasscodeNotSet) {
-                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Passcode not set on device");
+                    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Passcode not set - falling back to password");
                     [context release];
                     [pool drain];
-                    return PAM_AUTH_ERR;
+                    return PAM_IGNORE;
                 }
             }
             
@@ -168,10 +168,10 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
         }
     }
     
-    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Maximum authentication attempts exceeded");
+    pam_syslog(pamh, LOG_WARNING, "pam_touchid: Maximum authentication attempts exceeded - falling back to password");
     [context release];
     [pool drain];
-    return PAM_AUTH_ERR;
+    return PAM_IGNORE;
 }
 
 /*
