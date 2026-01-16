@@ -74,9 +74,27 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
     for (i = 0; i < PAM_TOUCHID_MAX_RETRIES; i++) {
         error = nil;
         
-        if ([context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
-                    localizedReason:@"Authenticate with Touch ID for sudo"
-                              error:&error]) {
+        /* Use synchronous evaluation with proper method signature */
+        __block BOOL authSuccess = NO;
+        __block LAError authError = 0;
+        
+        /* Create a dispatch semaphore to wait for async completion */
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        
+        [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+                localizedReason:@"Authenticate with Touch ID for sudo"
+                         reply:^(BOOL success, NSError *error) {
+            authSuccess = success;
+            if (error) {
+                authError = [error code];
+            }
+            dispatch_semaphore_signal(sema);
+        }];
+        
+        /* Wait for authentication to complete */
+        dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+        
+        if (authSuccess) {
             /* Authentication successful */
             pam_syslog(pamh, LOG_INFO, "pam_touchid: Touch ID authentication successful for user %s", user);
             [context release];
@@ -84,8 +102,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags,
             return PAM_SUCCESS;
         } else {
             /* Authentication failed */
-            if (error) {
-                LAError errorCode = [error code];
+            if (authError != 0) {
+                LAError errorCode = authError;
                 
                 if (errorCode == LAErrorUserCancel) {
                     pam_syslog(pamh, LOG_DEBUG, "pam_touchid: User cancelled Touch ID");

@@ -134,6 +134,10 @@ PREINSTALL
 cat > "$WORK_DIR/scripts/postinstall" << 'POSTINSTALL'
 #!/bin/bash
 
+# Enable logging to system log
+exec 1> >(logger -s -t "touchid-postinstall")
+exec 2>&1
+
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║  Touch ID for Sudo - Configuration in Progress               ║"
@@ -144,6 +148,10 @@ echo ""
 PAM_MODULE="/usr/local/lib/pam/pam_touchid.so"
 SUDO_PAM="/etc/pam.d/sudo"
 BACKUP_PAM="/etc/pam.d/sudo.backup.touchid"
+
+echo "DEBUG: Postinstall script executing as UID $(id -u)"
+echo "DEBUG: PAM_MODULE=$PAM_MODULE"
+echo "DEBUG: SUDO_PAM=$SUDO_PAM"
 
 # Verify PAM module exists
 if [ ! -f "$PAM_MODULE" ]; then
@@ -163,12 +171,14 @@ fi
 # Configure sudo to use Touch ID
 if ! grep -q "pam_touchid.so" "$SUDO_PAM"; then
     # Add auth sufficient line for Touch ID before the unix auth
-    sed -i '.bak' '/^auth.*pam_unix.so/i\
-auth       sufficient     '$PAM_MODULE'
-' "$SUDO_PAM"
+    sed -i '.bak' "/^auth.*pam_unix.so/i\\
+auth       sufficient     $PAM_MODULE" "$SUDO_PAM"
     echo "✓ Configured sudo to use Touch ID"
+    echo "DEBUG: Updated sudo PAM configuration"
+    grep pam_touchid "$SUDO_PAM" && echo "DEBUG: Verified pam_touchid.so is in $SUDO_PAM" || echo "DEBUG: WARNING - pam_touchid.so NOT found in $SUDO_PAM"
 else
     echo "ℹ Sudo already configured for Touch ID"
+    echo "DEBUG: Touch ID already configured"
 fi
 
 echo ""
